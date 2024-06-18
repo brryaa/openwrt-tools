@@ -1,0 +1,71 @@
+#!/bin/sh
+# 定义日志文件路径
+LOGFILE="/root/connection_log.txt"
+
+# 定义测试连通性的 URL
+URL1="google.com"
+URL2="zh.wikipedia.org"
+
+# 定义重启计数器文件
+REBOOT_COUNTER_FILE="/etc/logs/reboot_counter.txt"
+REBOOT_INTERVAL=60  # 重启间隔，以分钟计
+
+# 检查开机时间，单位为分钟
+uptime_minutes=$(awk '{print int($1/60)}' /proc/uptime)
+
+# 执行测试函数
+perform_test() {
+    if curl -m 3 -s -I "$1" | grep -q "HTTP/"; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# 初始测试
+if perform_test $URL1 || perform_test $URL2; then
+    echo "$(date) - Initial connection test successful." >> $LOGFILE
+    exit 0
+elif [ $uptime_minutes -lt 5 ]; then
+    echo "$(date) - Initial connection test failed within 5 minutes of boot. Exiting." >> $LOGFILE
+    exit 0
+fi
+
+# 加载或初始化重启计数器
+if [ -f $REBOOT_COUNTER_FILE ]; then
+    . $REBOOT_COUNTER_FILE
+else
+    echo "reboot_count=0" > $REBOOT_COUNTER_FILE
+    echo "last_reboot_time=$uptime_minutes" >> $REBOOT_COUNTER_FILE
+fi
+
+# 判断是否需要重置计数器
+if [ $(($uptime_minutes - $last_reboot_time)) -ge $REBOOT_INTERVAL ]; then
+    echo "reboot_count=0" > $REBOOT_COUNTER_FILE
+    echo "last_reboot_time=$uptime_minutes" >> $REBOOT_COUNTER_FILE
+elif [ $reboot_count -ge 3 ]; then
+    echo "$(date) - Too many reboots within one hour. Exiting without reboot." >> $LOGFILE
+    exit 0
+fi
+
+# 实际的连接测试与重启逻辑
+sleep 15
+if perform_test $URL1 || perform_test $URL2; then
+    echo "$(date) - Connection test successful after initial failure." >> $LOGFILE
+else
+    echo "$(date) - Connection test failed. Restarting services." >> $LOGFILE
+    /etc/init.d/v2raya restart
+    /usr/bin/v2ray run --config=/etc/v2raya/config.json &
+    
+    sleep 60  # 等待服务重新启动并稳定
+    # 再次进行测试，如果还是失败，则重启系统
+    if perform_test $URL1 || perform_test $URL2; then
+        echo "$(date) - Connection restored after service restart." >> $LOGFILE
+    else
+        echo "$(date) - Persistent connection failure. Preparing to reboot system." >> $LOGFILE
+        reboot_count=$(($reboot_count + 1))
+        echo "reboot_count=$reboot_count" > $REBOOT_COUNTER_FILE
+        echo "last_reboot_time=$uptime_minutes" >> $REBOOT_COUNTER_FILE
+        reboot
+    fi
+fi
